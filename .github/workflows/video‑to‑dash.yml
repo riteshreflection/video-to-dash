@@ -1,10 +1,5 @@
 name: Convert uploaded video to DASH
 
-###############################################################################
-# Triggers
-# • repository_dispatch (automatic – sent by your Worker)
-# • workflow_dispatch  (manual – button in GitHub → Actions → Run workflow)
-###############################################################################
 on:
   repository_dispatch:
     types: [video_uploaded]
@@ -18,12 +13,9 @@ on:
         description: "Destination key in R2 (optional, e.g. uploads/my.mp4)"
         required: false
 
-###############################################################################
-# Global environment
-###############################################################################
 env:
-  R2_BUCKET: classes                                # your bucket name
-  ACCOUNT_ID: ${{ secrets.ACCOUNT_ID }}            # set in repo secrets
+  R2_BUCKET: classes
+  ACCOUNT_ID: ${{ secrets.ACCOUNT_ID }}
   R2_ENDPOINT: https://${{ secrets.ACCOUNT_ID }}.r2.cloudflarestorage.com
 
 jobs:
@@ -32,67 +24,46 @@ jobs:
     timeout-minutes: 120
 
     steps:
-    # 1️⃣ Checkout (empty repo keeps workspace tidy)
-    - name: Checkout (empty)
+    - name: Checkout (empty repo)
       uses: actions/checkout@v4
       with:
         sparse-checkout: ""
 
-    # 2️⃣ Derive SOURCE_URL and KEY from either trigger source
     - name: Derive SOURCE_URL and KEY
-      id: derive
       run: |
         set -euo pipefail
-
-        SOURCE_URL="${{ github.event.client_payload.publicUrl }}"
-        if [ -z "$SOURCE_URL" ]; then
-          SOURCE_URL="${{ github.event.inputs.publicUrl }}"
-        fi
-
-        KEY="${{ github.event.client_payload.key }}"
+        SOURCE_URL="${{ github.event.client_payload.publicUrl || github.event.inputs.publicUrl }}"
+        KEY="${{ github.event.client_payload.key || github.event.inputs.key }}"
         if [ -z "$KEY" ]; then
-          KEY_INPUT="${{ github.event.inputs.key }}"
-          if [ -n "$KEY_INPUT" ]; then
-            KEY="$KEY_INPUT"
-          else
-            FILENAME=$(basename "$SOURCE_URL")
-            KEY="uploads/$FILENAME"
-          fi
+          KEY="uploads/$(basename "$SOURCE_URL")"
         fi
-
         echo "SOURCE_URL=$SOURCE_URL" >> $GITHUB_ENV
         echo "KEY=$KEY"               >> $GITHUB_ENV
-        echo "Derived variables:"
-        echo "  SOURCE_URL=$SOURCE_URL"
-        echo "  KEY=$KEY"
 
-    # 3️⃣ Install FFmpeg (manual apt install)
     - name: Install FFmpeg
       run: |
         sudo apt-get update
         sudo apt-get install -y ffmpeg
-        ffmpeg -version | head -n 1
+        ffmpeg -version | head -n1
 
-    # 4️⃣ Install AWS CLI (for R2 upload)
     - name: Install AWS CLI
       run: |
         sudo apt-get update
-        sudo apt-get install -y awscli
+        sudo apt-get install -y python3-pip
+        python3 -m pip install --upgrade --user awscli
+        echo "$HOME/.local/bin" >> $GITHUB_PATH
+        aws --version
 
-    # 5️⃣ Download the original MP4
     - name: Download original MP4
       run: |
         mkdir -p work
-        echo "Downloading $SOURCE_URL ..."
         curl -L "$SOURCE_URL" --fail -o work/input.mp4
         du -h work/input.mp4
 
-    # 6️⃣ Transcode to MPEG-DASH
     - name: Convert to DASH
       run: |
         mkdir -p work/dash
         BASE=$(basename "$KEY" .mp4)
-        echo "Transcoding → work/dash/${BASE}.mpd"
         ffmpeg -y -i work/input.mp4 \
           -vf scale=w=1280:h=-2:flags=bicubic \
           -map 0 -map -0:s \
@@ -104,26 +75,18 @@ jobs:
           -use_template 1 -use_timeline 1 \
           -adaptation_sets "id=0,streams=v id=1,streams=a" \
           work/dash/${BASE}.mpd
-        echo "Transcode complete:"
-        du -h work/dash | sort -h
 
-    # 7️⃣ Upload DASH manifest + segments to R2
     - name: Upload DASH to R2
       env:
         AWS_ACCESS_KEY_ID:     ${{ secrets.R2_ACCESS_KEY_ID }}
         AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
         AWS_EC2_METADATA_DISABLED: true
       run: |
-        aws s3 cp work/dash \
-          "s3://${{ env.R2_BUCKET }}/dash/" \
-          --recursive \
+        aws s3 cp work/dash "s3://${{ env.R2_BUCKET }}/dash/" --recursive \
           --endpoint-url "${{ env.R2_ENDPOINT }}"
-        echo "Upload finished."
 
-    # 8️⃣ Human‑readable summary in logs
     - name: Report summary
       run: |
         BASE=$(basename "$KEY" .mp4)
-        echo ""
-        echo "🎉 DASH manifest:"
+        echo "🎉 DASH manifest ready at:"
         echo "https://classes.thecampus.in/dash/${BASE}.mpd"
