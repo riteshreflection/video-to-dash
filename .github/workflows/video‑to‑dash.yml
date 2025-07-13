@@ -75,8 +75,8 @@ jobs:
         echo "  KEY=$KEY"
 
     # 3. Install FFmpeg (binary)
-    - name: Install FFmpeg
-      uses: ilammy/setup-ffmpeg@v2
+    - name: Check FFmpeg version
+      run: ffmpeg -version
 
     # 4. Install AWS CLI v2 (needed for R2 S3‑compatible upload)
     - name: Install AWS CLI
