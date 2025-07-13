@@ -91,7 +91,10 @@ jobs:
     - name: Convert to DASH (single‑file, 720/480/360 + audio)
       run: |
         mkdir -p work/dash
-        BASE=$(basename "$KEY" .mp4)
+
+        # ➜ KEY might be "uploads/123.mp4" or "dash/5files"
+        CLEAN_NAME=$(basename "$KEY")      # e.g. 123.mp4  OR  5files
+        BASE="${CLEAN_NAME%.*}"            # strip .mp4 if present → 123  OR  5files
 
         ffmpeg -y -i work/input.mp4 \
           \
@@ -114,10 +117,11 @@ jobs:
           -single_file 1 \
           -min_seg_duration 5000000 \
           -adaptation_sets "id=0,streams=v id=1,streams=a" \
-          work/dash/${BASE}.mpd
+          "work/dash/${BASE}.mpd"
 
-        echo "Files generated:"
+        echo "Files generated in work/dash/:"
         ls -lh work/dash
+
 
     # 7️⃣ upload to R2 (5 objects → 5 writes)
     - name: Upload DASH to R2
