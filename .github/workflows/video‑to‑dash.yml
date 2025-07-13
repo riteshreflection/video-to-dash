@@ -21,6 +21,7 @@ env:
 jobs:
   transcode:
     runs-on: ubuntu-latest
+    environment: CloudFlare Secretary
     timeout-minutes: 120
 
     steps:
