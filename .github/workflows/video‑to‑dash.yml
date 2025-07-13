@@ -16,7 +16,7 @@ on:
 env:
   R2_BUCKET: classes
   ACCOUNT_ID: ${{ secrets.ACCOUNT_ID }}
-  R2_ENDPOINT: https://${{ secrets.ACCOUNT_ID }}.r2.cloudflarestorage.com
+  R2_ENDPOINT: https://300ec3f71b1ad69fea75564497e04614.r2.cloudflarestorage.com
 
 jobs:
   transcode:
