@@ -1,100 +1,107 @@
-name: Convert uploaded video to DASH ‑ single‑file (720/480/360)
+name: Convert uploaded video to DASH (5‑file single‑segment)
 
+###############################################################################
+# Triggers
+###############################################################################
 on:
-  # automatic trigger from the Worker
   repository_dispatch:
     types: [video_uploaded]
 
-  # manual trigger in GitHub UI
   workflow_dispatch:
     inputs:
       publicUrl:
-        description: "Direct URL to the source MP4 (https://.../file.mp4)"
+        description: "Direct HTTPS URL to the source MP4"
         required: true
       key:
-        description: "Destination key in R2 (optional, e.g. uploads/my.mp4)"
+        description: "Destination key in R2 (optional, e.g. uploads/name.mp4)"
         required: false
 
 ###############################################################################
-# Global ENV – account id comes from the environment‑level secret you created
+# Global ENV
 ###############################################################################
 env:
   R2_BUCKET: classes
   ACCOUNT_ID: ${{ secrets.ACCOUNT_ID }}
   R2_ENDPOINT: https://300ec3f71b1ad69fea75564497e04614.r2.cloudflarestorage.com
 
+###############################################################################
+# Job
+###############################################################################
 jobs:
   transcode:
     runs-on: ubuntu-latest
-    environment: CloudFlare Secretary          # << your secrets live here
+    environment: CloudFlare Secretary          # your secrets live here
     timeout-minutes: 120
 
     steps:
-    # 1️⃣ checkout (empty)
-    - name: Checkout (empty)
+    # 1️⃣ Checkout (empty pull)
+    - name: Checkout
       uses: actions/checkout@v4
       with:
         sparse-checkout: ""
 
-    # 2️⃣ derive SOURCE_URL and KEY (cannot use || inside ${{ }})
+    # 2️⃣ Derive SOURCE_URL and KEY safely
     - name: Derive SOURCE_URL and KEY
       id: derive
+      env:
+        PAYLOAD_URL: ${{ github.event.client_payload.publicUrl }}
+        PAYLOAD_KEY: ${{ github.event.client_payload.key }}
+        MANUAL_URL:  ${{ github.event.inputs.publicUrl }}
+        MANUAL_KEY:  ${{ github.event.inputs.key }}
       run: |
         set -euo pipefail
-        # read from dispatch payload
-        SOURCE_URL="${{ github.event.client_payload.publicUrl }}"
-        KEY="${{ github.event.client_payload.key }}"
+        # Prefer repository_dispatch payload, else manual input
+        SOURCE_URL="${PAYLOAD_URL:-}"
+        [ -z "$SOURCE_URL" ] && SOURCE_URL="${MANUAL_URL}"
 
-        # fall back to manual inputs when undefined
-        if [ -z "$SOURCE_URL" ]; then
-          SOURCE_URL="${{ github.event.inputs.publicUrl }}"
-        fi
+        KEY="${PAYLOAD_KEY:-}"
         if [ -z "$KEY" ]; then
-          KEY_INPUT="${{ github.event.inputs.key }}"
-          if [ -n "$KEY_INPUT" ]; then
-            KEY="$KEY_INPUT"
-          else
-            KEY="uploads/$(basename "$SOURCE_URL")"
-          fi
+          KEY="$MANUAL_KEY"
+        fi
+        # Final fallback: build a key from the URL filename
+        if [ -z "$KEY" ]; then
+          KEY="uploads/$(basename "$SOURCE_URL")"
         fi
 
         echo "SOURCE_URL=$SOURCE_URL" >> $GITHUB_ENV
         echo "KEY=$KEY"               >> $GITHUB_ENV
-        echo "Using SOURCE_URL=$SOURCE_URL"
-        echo "Using KEY=$KEY"
 
-    # 3️⃣ install FFmpeg
+    # 3️⃣ Install FFmpeg
     - name: Install FFmpeg
       run: |
         sudo apt-get update -y
         sudo apt-get install -y ffmpeg
         ffmpeg -version | head -n1
 
-    # 4️⃣ install AWS CLI (pip)
-    - name: Install AWS CLI
+    # 4️⃣ Cache + install AWS CLI (fast on re‑run)
+    - name: Cache pip dir for AWS CLI
+      uses: actions/cache@v4
+      with:
+        path: ~/.cache/pip
+        key: pip-awscli-v2
+
+    - name: Install AWS CLI
       run: |
-        sudo apt-get update -y
-        sudo apt-get install -y python3-pip
         python3 -m pip install --upgrade --user awscli
         echo "$HOME/.local/bin" >> $GITHUB_PATH
         aws --version
 
-    # 5️⃣ download source
-    - name: Download original MP4
+    # 5️⃣ Download the video
+    - name: Download input MP4
       run: |
         mkdir -p work
-        echo "Downloading $SOURCE_URL"
+        echo "Downloading: $SOURCE_URL"
         curl -L "$SOURCE_URL" --fail -o work/input.mp4
         du -h work/input.mp4
 
-    # 6️⃣ transcode to DASH single‑file, 3 video reps + 1 audio  → 5 objects
-    - name: Convert to DASH (single‑file, 720/480/360 + audio)
+    # 6️⃣ Transcode → 5‑file single‑segment DASH (720/480/360 + audio)
+    - name: Convert to DASH (5 files)
       run: |
         mkdir -p work/dash
 
-        # ➜ KEY might be "uploads/123.mp4" or "dash/5files"
-        CLEAN_NAME=$(basename "$KEY")      # e.g. 123.mp4  OR  5files
-        BASE="${CLEAN_NAME%.*}"            # strip .mp4 if present → 123  OR  5files
+        CLEAN_NAME=$(basename "$KEY" .mp4)   # remove folders & .mp4
+        [ -z "$CLEAN_NAME" ] && CLEAN_NAME="video_$(date +%s)"
+        BASE="$CLEAN_NAME"
 
         ffmpeg -y -i work/input.mp4 \
           \
@@ -110,7 +117,7 @@ jobs:
           -map 0:v -c:v:2 libx264 -b:v:2 400k  -maxrate:v:2 450k  -bufsize:v:2 600k \
           -vf:2 scale=w=640:h=-2:flags=bicubic \
           \
-          # --- audio (128 kbps) --------------------------------------------
+          # --- audio --------------------------------------------------------
           -map 0:a -c:a aac -b:a 128k \
           \
           -f dash \
@@ -119,12 +126,11 @@ jobs:
           -adaptation_sets "id=0,streams=v id=1,streams=a" \
           "work/dash/${BASE}.mpd"
 
-        echo "Files generated in work/dash/:"
+        echo "Files generated:"
         ls -lh work/dash
 
-
-    # 7️⃣ upload to R2 (5 objects → 5 writes)
-    - name: Upload DASH to R2
+    # 7️⃣ Upload 5 objects → R2
+    - name: Upload to R2
       env:
         AWS_ACCESS_KEY_ID:     ${{ secrets.R2_ACCESS_KEY_ID }}
         AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
@@ -133,9 +139,8 @@ jobs:
         aws s3 cp work/dash "s3://${{ env.R2_BUCKET }}/dash/" --recursive \
           --endpoint-url "${{ env.R2_ENDPOINT }}"
 
-    # 8️⃣ summary
+    # 8️⃣ Summary
     - name: Report summary
       run: |
-        BASE=$(basename "$KEY" .mp4)
-        echo "🎉 DASH manifest ready at:" >> $GITHUB_STEP_SUMMARY
-        echo "https://classes.thecampus.in/dash/${BASE}.mpd" >> $GITHUB_STEP_SUMMARY
+        echo "### 🎉 DASH manifest" >> $GITHUB_STEP_SUMMARY
+        echo "https://classes.thecampus.in/dash/${CLEAN_NAME}.mpd" >> $GITHUB_STEP_SUMMARY
