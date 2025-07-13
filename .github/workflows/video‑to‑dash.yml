@@ -31,15 +31,32 @@ jobs:
         sparse-checkout: ""
 
     - name: Derive SOURCE_URL and KEY
+      id: derive
       run: |
         set -euo pipefail
-        SOURCE_URL="${{ github.event.client_payload.publicUrl || github.event.inputs.publicUrl }}"
-        KEY="${{ github.event.client_payload.key || github.event.inputs.key }}"
-        if [ -z "$KEY" ]; then
-          KEY="uploads/$(basename "$SOURCE_URL")"
+
+        # 1. SOURCE_URL – prefer repository_dispatch, fallback to manual input
+        SOURCE_URL="${{ github.event.client_payload.publicUrl }}"
+        if [ -z "$SOURCE_URL" ]; then
+          SOURCE_URL="${{ github.event.inputs.publicUrl }}"
         fi
+
+        # 2. KEY – prefer payload key, fallback to manual input
+        KEY="${{ github.event.client_payload.key }}"
+        if [ -z "$KEY" ]; then
+          KEY_INPUT="${{ github.event.inputs.key }}"
+          if [ -n "$KEY_INPUT" ]; then
+            KEY="$KEY_INPUT"
+          else
+            KEY="uploads/$(basename "$SOURCE_URL")"
+          fi
+        fi
+
         echo "SOURCE_URL=$SOURCE_URL" >> $GITHUB_ENV
         echo "KEY=$KEY"               >> $GITHUB_ENV
+
+        echo "::notice::SOURCE_URL=$SOURCE_URL"
+        echo "::notice::KEY=$KEY"
 
     - name: Install FFmpeg and AWS CLI
       run: |
