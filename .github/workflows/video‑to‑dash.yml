@@ -1,53 +1,110 @@
 name: Convert uploaded video to DASH
 
+################################################################################
+# ──────── Triggers ────────
+# 1) Automatic: repository_dispatch from Cloudflare Worker
+#    payload: { publicUrl, key, size, contentType }
+#
+# 2) Manual: workflow_dispatch button in GitHub UI
+#    inputs:
+#      publicUrl (required)  – direct HTTPS link to MP4
+#      key        (optional) – destination path inside bucket
+################################################################################
 on:
   repository_dispatch:
     types: [video_uploaded]
 
+  workflow_dispatch:
+    inputs:
+      publicUrl:
+        description: "Direct URL to the source MP4 (https://.../file.mp4)"
+        required: true
+      key:
+        description: "Destination key inside R2 bucket (e.g. uploads/my.mp4). Leave blank to use filename from URL."
+        required: false
+
+################################################################################
+# ──────── Global env vars ────────
+################################################################################
 env:
   R2_BUCKET: classes
   ACCOUNT_ID: ${{ secrets.ACCOUNT_ID }}
-  R2_ENDPOINT: https://${{ env.ACCOUNT_ID }}.r2.cloudflarestorage.com
+  R2_ENDPOINT: https://${{ secrets.ACCOUNT_ID }}.r2.cloudflarestorage.com
 
 jobs:
   transcode:
     runs-on: ubuntu-latest
+    timeout-minutes: 120        # enough for large uploads
 
     steps:
-      - name: Checkout (empty)
-        uses: actions/checkout@v4
-        with:
-          sparse-checkout: ""
+    # 1. (Optional) checkout an empty repo; keeps workspace tidy
+    - name: Checkout (empty)
+      uses: actions/checkout@v4
+      with:
+        sparse-checkout: ""     # nothing to pull
 
-      - name: Install FFmpeg
-        uses: ilammy/setup-ffmpeg@v2
+    # 2. Set usable variables from either trigger source
+    - name: Derive SOURCE_URL and KEY
+      id: derive
+      run: |
+        # shell strictness
+        set -euo pipefail
 
-      - name: Download original MP4
-        run: |
-          mkdir -p work
-          curl -L "${{ github.event.client_payload.publicUrl }}" -o work/input.mp4
+        # Prefer repository_dispatch payload; fall back to manual inputs
+        SOURCE_URL="${{ github.event.client_payload.publicUrl }}"
+        if [ -z "$SOURCE_URL" ]; then
+          SOURCE_URL="${{ github.event.inputs.publicUrl }}"
+        fi
 
-      - name: Convert to DASH
-        run: |
-          mkdir -p work/dash
-          BASE=$(basename "${{ github.event.client_payload.key }}" .mp4)
-          ffmpeg -i work/input.mp4 \
-            -map 0 -map -0:s -c:v libx264 -crf 23 -preset veryfast \
-            -sc_threshold 0 -g 48 -keyint_min 48 \
-            -c:a aac -b:a 128k -ar 48000 \
-            -f dash \
-            -seg_duration 4 -use_timeline 1 -use_template 1 \
-            -adaptation_sets "id=0,streams=v id=1,streams=a" \
-            work/dash/${BASE}.mpd
+        KEY="${{ github.event.client_payload.key }}"
+        if [ -z "$KEY" ]; then
+          KEY_INPUT="${{ github.event.inputs.key }}"
+          if [ -n "$KEY_INPUT" ]; then
+            KEY="$KEY_INPUT"
+          else
+            # No key provided – build one from the file name
+            FILENAME=$(basename "$SOURCE_URL")
+            KEY="uploads/$FILENAME"
+          fi
+        fi
 
-      - name: Upload DASH set to R2
-        env:
-          AWS_ACCESS_KEY_ID:     ${{ secrets.R2_ACCESS_KEY_ID }}
-          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
-          AWS_EC2_METADATA_DISABLED: true
-        run: |
-          aws s3 cp work/dash "s3://${{ env.R2_BUCKET }}/dash/" --recursive \
-            --endpoint-url ${{ env.R2_ENDPOINT }}
+        echo "SOURCE_URL=$SOURCE_URL" >> $GITHUB_ENV
+        echo "KEY=$KEY"               >> $GITHUB_ENV
+        echo "Base vars:"
+        echo "  SOURCE_URL=$SOURCE_URL"
+        echo "  KEY=$KEY"
 
-      - name: Report success
-        run: echo "DASH at https://classes.thecampus.in/dash/"
+    # 3. Install FFmpeg (binary)
+    - name: Install FFmpeg
+      uses: ilammy/setup-ffmpeg@v2
+
+    # 4. Install AWS CLI v2 (needed for R2 S3‑compatible upload)
+    - name: Install AWS CLI
+      run: |
+        sudo apt-get update -y
+        sudo apt-get install -y awscli
+
+    # 5. Download the original MP4
+    - name: Download original MP4
+      run: |
+        mkdir -p work
+        echo "Fetching $SOURCE_URL ..."
+        curl -L "$SOURCE_URL" --fail -o work/input.mp4
+        ls -lh work
+
+    # 6. Convert to MPEG‑DASH (single‑rep 720p example; tweak to taste)
+    - name: Convert to DASH
+      run: |
+        mkdir -p work/dash
+        BASE=$(basename "$KEY" .mp4)
+        echo "Transcoding → work/dash/${BASE}.mpd"
+        ffmpeg -y -i work/input.mp4 \
+          -vf scale=w=1280:h=-2:flags=bicubic \
+          -map 0 -map -0:s \
+          -c:v libx264 -preset veryfast -crf 23 \
+          -c:a aac -b:a 128k \
+          -sc_threshold 0 -g 48 -keyint_min 48 \
+          -f dash \
+          -seg_duration 4 \
+          -use_template 1 -use_timeline 1 \
+          -adaptation_sets "id=0,streams=v id=1,streams=a_
