@@ -5,49 +5,49 @@ on:
     types: [video_uploaded]
 
 env:
-  R2_BUCKET: classes              # same bucket as the Worker
-  R2_ENDPOINT: https://$ACCOUNT_ID.r2.cloudflarestorage.com
+  R2_BUCKET: classes
+  ACCOUNT_ID: ${{ secrets.ACCOUNT_ID }}
+  R2_ENDPOINT: https://${{ env.ACCOUNT_ID }}.r2.cloudflarestorage.com
 
 jobs:
   transcode:
     runs-on: ubuntu-latest
 
     steps:
-    - name: Checkout (empty)       # ffmpeg doesn’t need code, but checkout keeps $GITHUB_WORKSPACE
-      uses: actions/checkout@v4
-      with:
-        sparse-checkout: ""
+      - name: Checkout (empty)
+        uses: actions/checkout@v4
+        with:
+          sparse-checkout: ""
 
-    - name: Install FFmpeg
-      uses: ilammy/setup-ffmpeg@v2          # proven marketplace action :contentReference[oaicite:0]{index=0}
+      - name: Install FFmpeg
+        uses: ilammy/setup-ffmpeg@v2
 
-    - name: Download original MP4
-      run: |
-        mkdir work
-        curl -L "${{ github.event.client_payload.publicUrl }}" -o work/input.mp4
+      - name: Download original MP4
+        run: |
+          mkdir -p work
+          curl -L "${{ github.event.client_payload.publicUrl }}" -o work/input.mp4
 
-    - name: Convert to DASH
-      run: |
-        mkdir -p work/dash
-        BASE=$(basename "${{ github.event.client_payload.key }}" .mp4)
-        ffmpeg -i work/input.mp4 \
-          -map 0 -map -0:s -c:v libx264 -crf 23 -preset veryfast \
-          -sc_threshold 0 -g 48 -keyint_min 48 \
-          -c:a aac -b:a 128k -ar 48000 \
-          -f dash \
-          -seg_duration 4 -use_timeline 1 -use_template 1 \
-          -adaptation_sets "id=0,streams=v id=1,streams=a" \
-          work/dash/$BASE.mpd
+      - name: Convert to DASH
+        run: |
+          mkdir -p work/dash
+          BASE=$(basename "${{ github.event.client_payload.key }}" .mp4)
+          ffmpeg -i work/input.mp4 \
+            -map 0 -map -0:s -c:v libx264 -crf 23 -preset veryfast \
+            -sc_threshold 0 -g 48 -keyint_min 48 \
+            -c:a aac -b:a 128k -ar 48000 \
+            -f dash \
+            -seg_duration 4 -use_timeline 1 -use_template 1 \
+            -adaptation_sets "id=0,streams=v id=1,streams=a" \
+            work/dash/${BASE}.mpd
 
-    - name: Upload DASH set to R2
-      env:
-        AWS_ACCESS_KEY_ID:     ${{ secrets.R2_ACCESS_KEY_ID }}
-        AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
-        AWS_EC2_METADATA_DISABLED: true
-      run: |
-        aws s3 cp work/dash \
-          "s3://$R2_BUCKET/dash/" \
-          --recursive --endpoint-url $R2_ENDPOINT        # S3‑compatible API :contentReference[oaicite:1]{index=1}
+      - name: Upload DASH set to R2
+        env:
+          AWS_ACCESS_KEY_ID:     ${{ secrets.R2_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          AWS_EC2_METADATA_DISABLED: true
+        run: |
+          aws s3 cp work/dash "s3://${{ env.R2_BUCKET }}/dash/" --recursive \
+            --endpoint-url ${{ env.R2_ENDPOINT }}
 
-    - name: Report success (optional)
-      run: echo "DASH files available at https://classes.thecampus.in/dash/"
+      - name: Report success
+        run: echo "DASH at https://classes.thecampus.in/dash/"
